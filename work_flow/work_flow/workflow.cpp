@@ -1,16 +1,12 @@
 #include "workflow.h"
-#include <time.h>
+#include <ctime>
 
 work_base::work_base( work_flow* flow_, int sec )
 : seconds(sec)
-, timeout_calc_status(false)
 , prev(NULL)
 , next(NULL)
 , state_(work_state_none)
 , flow(flow_)
-, intput_context(NULL)
-, output_context(NULL)
-, response_complete_(false)
 {
 	ASYNC_UTILITY_DEBUG_OUTPUT("work_base cstr!");
 }
@@ -18,25 +14,25 @@ work_base::work_base( work_flow* flow_, int sec )
 work_base::~work_base()
 {
 	ASYNC_UTILITY_DEBUG_OUTPUT("work_base dstr!");
-	SAFE_DELETE(intput_context);
-	SAFE_DELETE(output_context);
 }
 
-void work_base::response_complete( bool success, void* data /*= NULL */ )
+void work_base::end_( bool success )
 {
-	if (state_ != work_state_pending || response_complete_)
+	if (state_ != work_state_pending)
 		return;
-
-	output_context = data;
 
 	if (!success)
 	{
 		flow->execute_res_ = work_flow_execute_result_fail;
+		ASYNC_UTILITY_DEBUG_OUTPUT("work_flow execute failed!");
 	}
 	else
 	{
 		if (!next)
+		{
 			flow->execute_res_ = work_flow_execute_result_success;
+			ASYNC_UTILITY_DEBUG_OUTPUT("work_flow execute success!");
+		}
 		else
 			flow->cursor = next;
 	}
@@ -44,30 +40,18 @@ void work_base::response_complete( bool success, void* data /*= NULL */ )
 	if (flow->execute_res_ != work_flow_execute_result_unknow)
 	{
 		/// todo error handler
-		
 		flow->gc_status = true;
 	}
-
-	response_complete_ = true;
-}
-
-bool work_base::start()
-{
-	/// timeout
-	timeout_calc_status = true;
-	start_time = time(NULL);
-
-	if (prev)
-		intput_context = clone_output_context(prev->intput_context);
-	
-	return request(intput_context);
 }
 
 void work_base::update()
 {
 	if (state_ == work_state_none)
 	{
-		if (!start())
+		/// start timeout
+		start_time = time(NULL);
+
+		if (!begin())
 		{
 			flow->execute_res_ = work_flow_execute_result_fail;
 			return;
@@ -79,19 +63,19 @@ void work_base::update()
 	return;
 }
 
-work_flow::work_flow()
+work_flow::work_flow( context_base* ctx )
 : head(NULL)
 , tail(NULL)
 , cursor(NULL)
 , execute_res_(work_flow_execute_result_unknow)
 , gc_status(false)
+, context(ctx)
 {
 	ASYNC_UTILITY_DEBUG_OUTPUT("work_flow cstr!");
 }
 
 work_flow::~work_flow()
 {
-	ASYNC_UTILITY_DEBUG_OUTPUT("work_flow dstr!");
 	work_base* curr = head;
 	while(curr)
 	{
@@ -99,6 +83,9 @@ work_flow::~work_flow()
 		SAFE_DELETE(curr);
 		curr = next;
 	}
+
+	SAFE_DELETE(context);
+	ASYNC_UTILITY_DEBUG_OUTPUT("work_flow dstr!");
 }
 
 void work_flow::link_work( work_base* work )
@@ -119,10 +106,10 @@ void work_flow::link_work( work_base* work )
 	}
 }
 
-void work_flow::submit( work_flow_manager* mgr )
+unsigned int work_flow::submit( work_flow_manager* mgr )
 {
 	cursor = head;
-	mgr->add_work_flow(this);
+	return mgr->add_work_flow(this);
 }
 
 void work_flow::update()
@@ -135,8 +122,11 @@ void work_flow::update()
 }
 
 work_flow_manager::work_flow_manager()
+: curr_id(0)
 {
 	ASYNC_UTILITY_DEBUG_OUTPUT("work_flow_manager cstr!");
+	work_flows.clear();
+	free_ids.clear();
 }
 
 work_flow_manager::~work_flow_manager()
@@ -144,28 +134,56 @@ work_flow_manager::~work_flow_manager()
 	ASYNC_UTILITY_DEBUG_OUTPUT("work_flow_manager dstr!");
 }
 
-void work_flow_manager::add_work_flow( work_flow* flow )
+unsigned int work_flow_manager::add_work_flow( work_flow* flow )
 {
-	work_flows.push_back(flow);
+	ASYNC_UTILITY_ASSERT(flow);
+
+	/// make id
+	int new_id;
+	if (!free_ids.empty())
+		new_id = free_ids.front();
+	else
+		new_id = ++curr_id;
+
+	std::map<unsigned int, work_flow*>::iterator itr = work_flows.find(new_id);
+	ASYNC_UTILITY_ASSERT(itr == work_flows.end());
+
+	/// not care insert failed
+	work_flows.insert(std::make_pair(new_id, flow));
+	return new_id;
 }
 
 void work_flow_manager::update()
 {
 	time_t curr_time = time(NULL);
 
-	std::list<work_flow*>::iterator flow_itr = work_flows.begin();
+	std::map<unsigned int, work_flow*>::iterator flow_itr = work_flows.begin();
 	for (; flow_itr != work_flows.end();)
 	{
-		work_flow* flow = *flow_itr;
+		work_flow* flow = flow_itr->second;
 		if (!flow || flow->gc_status)
 		{
-			SAFE_DELETE(*flow_itr);
+			free_ids.push_back(flow_itr->first);
+			SAFE_DELETE(flow_itr->second);
 			work_flows.erase(flow_itr++);
 			continue;
 		}
 
-		/// timeout
-		update_timeout(flow, curr_time);
+		ASYNC_UTILITY_ASSERT(flow->execute_res_ == work_flow_execute_result_unknow);
+
+		/// timeout, just case the current state of flow
+		work_base* work = flow->cursor;
+		if (work && work->state_ == work_state_pending)
+		{
+			if ((curr_time - work->start_time) >= work->seconds)
+			{
+				/// timeout
+#if ASYNC_UTILITY_DEBUG
+				std::cout << "work_base id = " << work->get_id() << " execute timeout!" << std::endl;
+#endif
+				work->end_(false);
+			}
+		}
 
 		/// flow
 		flow->update();
@@ -174,22 +192,17 @@ void work_flow_manager::update()
 	}
 }
 
-void work_flow_manager::update_timeout( work_flow* flow, time_t curr_time )
+void work_flow_manager::plugging( unsigned int flow_id, unsigned int work_id, bool success, void* data /*= NULL */ )
 {
-	ASYNC_UTILITY_ASSERT(flow);
-
-	work_base* work = flow->head;
-	while (work)
+	std::map<unsigned int, work_flow*>::iterator itr = work_flows.find(flow_id);
+	if (itr != work_flows.end())
 	{
-		if (work->timeout_calc_status && !work->response_complete_)
+		work_flow* flow = itr->second;
+		work_base* work = flow->cursor;
+		if (work && work->get_id() == work_id)
 		{
-			if ((curr_time - work->start_time) >= work->seconds)
-			{
-				work->timeout_calc_status = false;
-				/// timeout
-				work->response_complete(false, NULL);
-			}
+			work->end(success, data);
+			work->end_(success);
 		}
-		work = work->next;
 	}
 }

@@ -8,6 +8,7 @@ date 2012/01/09
 
 #include "workflowcommon.h"
 #include <list>
+#include <map>
 
 enum work_state
 {
@@ -19,43 +20,45 @@ class work_base
 {
 	friend class work_flow;
 	friend class work_flow_manager;
+	enum { default_timeout_seconds = 0x20 };
 public:
-	work_base( work_flow* flow_, int sec );
+	/// need define id
+	work_base( work_flow* flow_, int sec = default_timeout_seconds );
 	virtual ~work_base();
 
 public:
-	virtual bool request( void* ctx ) = 0;
-	virtual void* clone_output_context( void* ctx ) = 0;
-	
-	/// ***called when this work response***
-	void response_complete( bool success, void* data = NULL );
-	/// ************************************
-
-	void set_input_context( void* ctx ) { intput_context = ctx; }
-	void* get_output_context() { return output_context; }
+	virtual unsigned int get_id() const = 0;
+	virtual bool begin() = 0;
+	virtual void end( bool success, void* data = NULL ) = 0;
 
 private:
-	bool start();
+	void end_( bool success );
 	void update();
 
 private:
 	int seconds;
 	time_t start_time;
-	bool timeout_calc_status;
 
 	work_base* prev;
 	work_base* next;
 	work_state state_;
 
 	work_flow* flow;
-	bool response_complete_;
 
 private:
-	void* intput_context;
-	void* output_context;
-
-private:
+	work_base();
 	DISALLOW_EVIL_CONSTRUCTORS( work_base );
+};
+
+/// the context contains entrys that work flow wanna know
+/// several kind of entrys:
+/// 1. associated with user's context entry, not care the lifetime
+/// 2. stack entry, auto
+/// 3. heap entry, lifetime controlled by destructor
+class context_base
+{
+public:
+	virtual ~context_base() {}
 };
 
 class work_flow_manager;
@@ -72,12 +75,14 @@ class work_flow
 	friend class work_base;
 	friend class work_flow_manager;
 public:
-	work_flow();
+	explicit work_flow( context_base* ctx );
 	~work_flow();
 
 public:
 	void link_work( work_base* work );
-	void submit( work_flow_manager* mgr );
+	unsigned int submit( work_flow_manager* mgr );
+
+private:
 	void update();
 
 private:
@@ -89,10 +94,15 @@ private:
 	bool gc_status;
 
 private:
+	context_base* context;
+
+private:
+	work_flow();
 	DISALLOW_EVIL_CONSTRUCTORS( work_flow );
 };
 
 /// a instance per thread
+/// todo precise control
 class work_flow_manager
 {
 public:
@@ -100,16 +110,18 @@ public:
 	~work_flow_manager();
 
 public:
-	void add_work_flow( work_flow* flow );
+	void plugging( unsigned int flow_id, unsigned int work_id, bool success, void* data = NULL );
 	void update();
-	
-	/// todo precise control
+	unsigned int add_work_flow( work_flow* flow );
 
 private:
 	void update_timeout( work_flow* flow, time_t curr_time );
 
 private:
-	std::list<work_flow*> work_flows;
+	std::map<unsigned int, work_flow*> work_flows;
+
+	unsigned int curr_id;
+	std::list<unsigned int> free_ids;
 
 private:
 	DISALLOW_EVIL_CONSTRUCTORS( work_flow_manager );
