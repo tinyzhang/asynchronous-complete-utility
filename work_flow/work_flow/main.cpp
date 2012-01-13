@@ -74,6 +74,7 @@ int main()
 
 		work_flow_manager_.update();
 		work_flow_manager_.plugging(flow_id, testflow_work_1, true);
+		work_flow_manager_.plugging(flow_id, testflow_work_2, true);
 	};
 	
 	return 0;
