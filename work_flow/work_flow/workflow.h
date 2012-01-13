@@ -61,14 +61,14 @@ public:
 	virtual ~context_base() {}
 };
 
-class work_flow_manager;
-
 enum work_flow_execute_result
 {
 	work_flow_execute_result_unknow = 0,
 	work_flow_execute_result_success,
 	work_flow_execute_result_fail
 };
+
+class work_flow_manager;
 
 class work_flow
 {
